@@ -8,8 +8,103 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>
+#include <climits>
 #include "R2Pixel.h"
 #include "R2Image.h"
+
+struct Location {
+  int i; int j;
+};
+
+double GetLuminosityFromRegion(
+  int dI, int dJ,
+  int centerI, int centerJ,
+  const R2Image *image)
+{
+  int imageI = centerI + dI;
+  int imageJ = centerJ + dJ;
+
+  return image->Pixel(imageI, imageJ).Y();
+}
+
+double CalculateDistance(int aI, int aJ, int bI, int bJ,
+  const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp, int regionSize)
+{
+  double distance = 0;
+
+  for (int regionI = 0; regionI < regionSize; regionI ++) {
+    for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
+      int dI = regionI - regionSize / 2;
+      int dJ = regionJ - regionSize / 2;
+
+      // Get all relevant values
+      double valA  = GetLuminosityFromRegion(dI, dJ, aI, aJ, A);
+      double valAp = GetLuminosityFromRegion(dI, dJ, aI, aJ, Ap);
+      double valB  = GetLuminosityFromRegion(dI, dJ, bI, bJ, B);
+      double valBp = GetLuminosityFromRegion(dI, dJ, bI, bJ, Bp);
+
+      // Take a squared difference of them
+      distance += (valB - valA) * (valB - valA);
+
+      // Skip Bp if the relevant pixel doesn't exist yet.
+      if (dJ > 0) continue;
+      if (dJ == 0 && dI >= 0) continue;
+
+      distance += (valBp - valAp) * (valBp - valAp);
+    }
+  }
+
+  return distance;
+}
+
+Location FindBestMatch(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp) {
+  int region = 3;
+  Location p;
+
+  double minDist = INT_MAX;
+
+  // Loop through A, storing the best match aI, aJ for region bI, bJ
+  for (int aI = 0; aI < B->Width(); aI++) {
+    for (int aJ = 0; aJ < B->Height(); aJ++) {
+      double dist = CalculateDistance(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
+    }
+  }
+
+  return p;
+}
+
+static R2Image *
+CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
+{
+  // Allocate Bp image
+  R2Image *Bp = new R2Image(B->Width(), B->Height());
+  if (!Bp) {
+    fprintf(stderr, "Unable to allocate output_image\n");
+    exit(-1);
+  }
+
+  // REPLACE CODE STARTING HERE
+  for (int i = 0; i < B->Width(); i++) {
+    printf("%d out of %d\n", i, B->Width());
+    for (int j = 0; j < B->Height(); j++) {
+      FindBestMatch(i, j, A, Ap, B, Bp);
+    }
+  }
+
+  // For now, just copy pixels from B
+  for (int i = 0; i < B->Width(); i++) {
+    for (int j = 0; j < B->Height(); j++) {
+      R2Pixel pixel = B->Pixel(i, j);
+      Bp->SetPixel(i, j, pixel);
+    }
+  }
+
+  // REPLACE CODE ENDING HERE
+
+  // Return Bp image
+  return Bp;
+}
 
 
 
@@ -22,10 +117,8 @@ static char *Bp_filename = NULL;
 static R2Pixel mask_color = R2blue_pixel;
 static int neighborhood_size = 5;
 
-
-
 static R2Image *
-ReadImage(const char *filename) 
+ReadImage(const char *filename)
 {
   // Allocate input_image
   R2Image *image = new R2Image();
@@ -44,41 +137,11 @@ ReadImage(const char *filename)
   return image;
 }
 
-
-
-static R2Image *
-CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
-{
-  // Allocate Bp image
-  R2Image *Bp = new R2Image(B->Width(), B->Height());
-  if (!Bp) {
-    fprintf(stderr, "Unable to allocate output_image\n");
-    exit(-1);
-  }
-
-  // REPLACE CODE STARTING HERE
-
-  // For now, just copy pixels from B
-  for (int i = 0; i < B->Width(); i++) {
-    for (int j = 0; j < B->Height(); j++) {
-      R2Pixel pixel = B->Pixel(i, j);
-      Bp->SetPixel(i, j, pixel);
-    }
-  }
-
-  // REPLACE CODE ENDING HERE
-
-  // Return Bp image
-  return Bp;
-}
-
-
-
-static int 
+static int
 ParseArgs(int argc, char **argv)
 {
-  // Parse program arguments 
-  argv++, argc--; 
+  // Parse program arguments
+  argv++, argc--;
   while (argc > 0) {
     if ((*argv)[0] == '-') {
       if (!strcmp(*argv, "-neighborhood_size")) { argv++; argc--; neighborhood_size = atoi(*argv); }
@@ -92,7 +155,7 @@ ParseArgs(int argc, char **argv)
       else if (!Bp_filename) Bp_filename = *argv;
       else { fprintf(stderr, "Invalid option: %s\n", *argv); return 0; }
     }
-    argv++, argc--; 
+    argv++, argc--;
   }
 
   // Check program arguments
@@ -107,7 +170,7 @@ ParseArgs(int argc, char **argv)
 
 
 
-int 
+int
 main(int argc, char **argv)
 {
   // Parse program arguments
@@ -131,6 +194,3 @@ main(int argc, char **argv)
   // Return success
   return 0;
 }
-
-
-
