@@ -20,18 +20,12 @@ struct Location {
 
 bool OutOfBounds(int i, int j, const R2Image *image)
 {
-  return i >= 0 && j >= 0 && i < image->Width() && j < image->Height();
+  return i < 0 || j < 0 || i >= image->Width() || j >= image->Height();
 }
 
-double GetLuminosityFromRegion(
-  int dI, int dJ,
-  int centerI, int centerJ,
-  const R2Image *image)
+double GetLuminosity(int i, int j, const R2Image *image)
 {
-  int imageI = centerI + dI;
-  int imageJ = centerJ + dJ;
-
-  return image->Pixel(imageI, imageJ).Y();
+  return image->Pixel(i, j).Y();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -58,11 +52,44 @@ double *GetVector(int aI, int aJ, const R2Image *A, int regionSize,
         if (dJ == 0 && dI >= 0) continue;
       }
 
-      vector[regionI * regionSize + regionJ] = GetLuminosityFromRegion(dI, dJ, aI, aJ, A);
+      vector[regionI * regionSize + regionJ] = GetLuminosity(aI + dI, aJ + dJ, A);
     }
   }
 
   return vector;
+}
+
+static void
+RunAnalogyANN(const R2Image *A, const R2Image *Ap,
+              const R2Image *B, R2Image *Bp)
+{
+  int regionSize = 5;
+
+  // Cache all the A and Ap feature vectors
+  double **vectorsA  = new double *[A->Width()  * A->Height() ];
+  double **vectorsAp = new double *[Ap->Width() * Ap->Height()];
+  for (int aI = 0; aI < A->Width(); aI++) {
+    for (int aJ = 0; aJ < A->Height(); aJ++) {
+      vectorsA [aI * A->Width() + aJ] = GetVector(aI, aJ, A,  regionSize);
+      vectorsAp[aI * A->Width() + aJ] = GetVector(aI, aJ, Ap, regionSize);
+    }
+  }
+
+  // for (int bI = 0; bI < B->Width(); bI++) {
+  //   printf("%d out of %d\n", bI, B->Width());
+  //   for (int bJ = 0; bJ < B->Height(); bJ++) {
+  //     Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
+  //     int aI = a.i;
+  //     int aJ = a.j;
+  //
+  //     R2Pixel pixelB = B->Pixel(bI, bJ);
+  //     R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+  //
+  //     R2Pixel p;
+  //     p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+  //     Bp->SetPixel(bI, bJ, p);
+  //   }
+  // }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -86,10 +113,10 @@ double CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
       }
 
       // Get all relevant values
-      double valA  = GetLuminosityFromRegion(dI, dJ, aI, aJ, A);
-      double valAp = GetLuminosityFromRegion(dI, dJ, aI, aJ, Ap);
-      double valB  = GetLuminosityFromRegion(dI, dJ, bI, bJ, B);
-      double valBp = GetLuminosityFromRegion(dI, dJ, bI, bJ, Bp);
+      double valA  = GetLuminosity(aI + dI, aJ + dJ, A);
+      double valAp = GetLuminosity(aI + dI, aJ + dJ, Ap);
+      double valB  = GetLuminosity(aI + dI, aJ + dJ, B);
+      double valBp = GetLuminosity(aI + dI, aJ + dJ, Bp);
 
       // Take a squared difference of them
       distance += (valB - valA) * (valB - valA);
@@ -106,7 +133,7 @@ double CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
 }
 
 Location FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp) {
-  int region = 3;
+  int region = 5;
   Location p;
 
   double minDist = INT_MAX;
@@ -132,7 +159,7 @@ Location FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap,
 
 static void
 RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
-                       const R2Image *B, R2Image *Bp)
+                const R2Image *B, R2Image *Bp)
 {
   for (int bI = 0; bI < B->Width(); bI++) {
     printf("%d out of %d\n", bI, B->Width());
@@ -165,6 +192,7 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   }
 
   RunAnalogyBrute(A, Ap, B, Bp);
+  // RunAnalogyANN(A, Ap, B, Bp);
 
   // Return Bp image
   return Bp;
