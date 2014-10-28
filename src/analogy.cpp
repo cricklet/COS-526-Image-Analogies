@@ -34,8 +34,43 @@ double GetLuminosityFromRegion(
   return image->Pixel(imageI, imageJ).Y();
 }
 
-double CalculateDistance(int aI, int aJ, int bI, int bJ,
-  const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp, int regionSize)
+////////////////////////////////////////////////////////////////////////////////
+// ANN methods
+
+double *GetVector(int aI, int aJ, const R2Image *A, int regionSize,
+                  bool skipLaterPixels = false)
+{
+  double *vector = new double[regionSize * regionSize];
+
+  for (int regionI = 0; regionI < regionSize; regionI ++) {
+    for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
+      int dI = regionI - regionSize / 2;
+      int dJ = regionJ - regionSize / 2;
+
+      // Skip if this is out of bounds
+      if (OutOfBounds(aI + dI, aJ + dJ, A)) {
+        continue;
+      }
+
+      // Skip if the relevant pixel doesn't exist yet.
+      if (skipLaterPixels) {
+        if (dJ > 0) continue;
+        if (dJ == 0 && dI >= 0) continue;
+      }
+
+      vector[regionI * regionSize + regionJ] = GetLuminosityFromRegion(dI, dJ, aI, aJ, A);
+    }
+  }
+
+  return vector;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Brute force methods
+
+double CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
+  const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp,
+  int regionSize)
 {
   double distance = 0;
 
@@ -70,7 +105,7 @@ double CalculateDistance(int aI, int aJ, int bI, int bJ,
   return distance;
 }
 
-Location FindBestMatch(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp) {
+Location FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp) {
   int region = 3;
   Location p;
 
@@ -81,7 +116,7 @@ Location FindBestMatch(int bI, int bJ, const R2Image *A, const R2Image *Ap, cons
   // Loop through A, storing the best match aI, aJ for region bI, bJ
   for (int aI = 0; aI < A->Width(); aI++) {
     for (int aJ = 0; aJ < A->Height(); aJ++) {
-      double dist = CalculateDistance(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
+      double dist = CalculateDistanceBrute(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
       if (dist < minDist) {
         minAI = aI;
         minAJ = aJ;
@@ -95,22 +130,14 @@ Location FindBestMatch(int bI, int bJ, const R2Image *A, const R2Image *Ap, cons
   return p;
 }
 
-static R2Image *
-CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
+static void
+RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
+                       const R2Image *B, R2Image *Bp)
 {
-  // Allocate Bp image
-  R2Image *Bp = new R2Image(B->Width(), B->Height());
-  if (!Bp) {
-    fprintf(stderr, "Unable to allocate output_image\n");
-    exit(-1);
-  }
-
-  // REPLACE CODE STARTING HERE
-
   for (int bI = 0; bI < B->Width(); bI++) {
     printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
-      Location a = FindBestMatch(bI, bJ, A, Ap, B, Bp);
+      Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
       int aI = a.i;
       int aJ = a.j;
 
@@ -122,8 +149,22 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
       Bp->SetPixel(bI, bJ, p);
     }
   }
+}
 
-  // REPLACE CODE ENDING HERE
+////////////////////////////////////////////////////////////////////////////////
+// Wrapper code
+
+static R2Image *
+CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
+{
+  // Allocate Bp image
+  R2Image *Bp = new R2Image(B->Width(), B->Height());
+  if (!Bp) {
+    fprintf(stderr, "Unable to allocate output_image\n");
+    exit(-1);
+  }
+
+  RunAnalogyBrute(A, Ap, B, Bp);
 
   // Return Bp image
   return Bp;
