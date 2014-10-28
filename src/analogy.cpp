@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <math.h>
 #include <climits>
+#include <ANN/ANN.h>
 #include "R2Pixel.h"
 #include "R2Image.h"
 
