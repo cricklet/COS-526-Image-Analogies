@@ -70,26 +70,27 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
   double **vectorsAp = new double *[Ap->Width() * Ap->Height()];
   for (int aI = 0; aI < A->Width(); aI++) {
     for (int aJ = 0; aJ < A->Height(); aJ++) {
-      vectorsA [aI * A->Width() + aJ] = GetVector(aI, aJ, A,  regionSize);
-      vectorsAp[aI * A->Width() + aJ] = GetVector(aI, aJ, Ap, regionSize);
+      printf("%d, %d => %d out of %d (%d * %d)\n", aI, aJ, (aI * A->Width() + aJ), (A->Width()  * A->Height()), A->Width(), A->Height());
+      vectorsA [aI * A->Height() + aJ] = GetVector(aI, aJ, A,  regionSize);
+      vectorsAp[aI * A->Height() + aJ] = GetVector(aI, aJ, Ap, regionSize);
     }
   }
 
-  // for (int bI = 0; bI < B->Width(); bI++) {
-  //   printf("%d out of %d\n", bI, B->Width());
-  //   for (int bJ = 0; bJ < B->Height(); bJ++) {
-  //     Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
-  //     int aI = a.i;
-  //     int aJ = a.j;
-  //
-  //     R2Pixel pixelB = B->Pixel(bI, bJ);
-  //     R2Pixel pixelAp = Ap->Pixel(aI, aJ);
-  //
-  //     R2Pixel p;
-  //     p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
-  //     Bp->SetPixel(bI, bJ, p);
-  //   }
-  // }
+  for (int bI = 0; bI < B->Width(); bI++) {
+    printf("%d out of %d\n", bI, B->Width());
+    for (int bJ = 0; bJ < B->Height(); bJ++) {
+      Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
+      int aI = a.i;
+      int aJ = a.j;
+
+      R2Pixel pixelB = B->Pixel(bI, bJ);
+      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+
+      R2Pixel p;
+      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      Bp->SetPixel(bI, bJ, p);
+    }
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -191,8 +192,8 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
     exit(-1);
   }
 
-  RunAnalogyBrute(A, Ap, B, Bp);
-  // RunAnalogyANN(A, Ap, B, Bp);
+  // RunAnalogyBrute(A, Ap, B, Bp);
+  RunAnalogyANN(A, Ap, B, Bp);
 
   // Return Bp image
   return Bp;
