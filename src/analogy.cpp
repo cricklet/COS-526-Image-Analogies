@@ -17,6 +17,11 @@ struct Location {
   int i; int j;
 };
 
+bool OutOfBounds(int i, int j, const R2Image *image)
+{
+  return i >= 0 && j >= 0 && i < image->Width() && j < image->Height();
+}
+
 double GetLuminosityFromRegion(
   int dI, int dJ,
   int centerI, int centerJ,
@@ -37,6 +42,12 @@ double CalculateDistance(int aI, int aJ, int bI, int bJ,
     for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
       int dI = regionI - regionSize / 2;
       int dJ = regionJ - regionSize / 2;
+
+      // Skip if this is out of bounds
+      if (OutOfBounds(aI + dI, aJ + dJ, A) ||
+          OutOfBounds(bI + dI, bJ + dJ, B)) {
+         continue;
+      }
 
       // Get all relevant values
       double valA  = GetLuminosityFromRegion(dI, dJ, aI, aJ, A);
@@ -63,13 +74,22 @@ Location FindBestMatch(int bI, int bJ, const R2Image *A, const R2Image *Ap, cons
   Location p;
 
   double minDist = INT_MAX;
+  int minAI = -1;
+  int minAJ = -1;
 
   // Loop through A, storing the best match aI, aJ for region bI, bJ
-  for (int aI = 0; aI < B->Width(); aI++) {
-    for (int aJ = 0; aJ < B->Height(); aJ++) {
+  for (int aI = 0; aI < A->Width(); aI++) {
+    for (int aJ = 0; aJ < A->Height(); aJ++) {
       double dist = CalculateDistance(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
+      if (dist < minDist) {
+        minAI = aI;
+        minAJ = aJ;
+      }
     }
   }
+
+  p.i = minAI;
+  p.j = minAJ;
 
   return p;
 }
@@ -85,18 +105,20 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   }
 
   // REPLACE CODE STARTING HERE
-  for (int i = 0; i < B->Width(); i++) {
-    printf("%d out of %d\n", i, B->Width());
-    for (int j = 0; j < B->Height(); j++) {
-      FindBestMatch(i, j, A, Ap, B, Bp);
-    }
-  }
 
-  // For now, just copy pixels from B
-  for (int i = 0; i < B->Width(); i++) {
-    for (int j = 0; j < B->Height(); j++) {
-      R2Pixel pixel = B->Pixel(i, j);
-      Bp->SetPixel(i, j, pixel);
+  for (int bI = 0; bI < B->Width(); bI++) {
+    printf("%d out of %d\n", bI, B->Width());
+    for (int bJ = 0; bJ < B->Height(); bJ++) {
+      Location a = FindBestMatch(bI, bJ, A, Ap, B, Bp);
+      int aI = a.i;
+      int aJ = a.j;
+
+      R2Pixel pixelB = B->Pixel(bI, bJ);
+      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+
+      R2Pixel p;
+      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      Bp->SetPixel(bI, bJ, p);
     }
   }
 
