@@ -106,6 +106,96 @@ RemapLuminance(R2Image *A, R2Image *Ap, const R2Image *B)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Brute force methods
+
+static double
+CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
+  const R2Image *A, const R2Image *Ap, const R2Image *B, const R2Image *Bp,
+  int regionSize)
+{
+  double distance = 0;
+
+  for (int regionI = 0; regionI < regionSize; regionI ++) {
+    for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
+      int dI = regionI - regionSize / 2;
+      int dJ = regionJ - regionSize / 2;
+
+      // Skip if this is out of bounds
+      if (OutOfBounds(aI + dI, aJ + dJ, A) ||
+          OutOfBounds(bI + dI, bJ + dJ, B)) {
+        continue;
+      }
+
+      // Get all relevant values
+      double valWeight = Gauss(dI, dJ, regionSize);
+      double valA  = GetLuminosity(aI + dI, aJ + dJ, A)  * valWeight;
+      double valAp = GetLuminosity(aI + dI, aJ + dJ, Ap) * valWeight;
+      double valB  = GetLuminosity(bI + dI, bJ + dJ, B)  * valWeight;
+      double valBp = GetLuminosity(bI + dI, bJ + dJ, Bp) * valWeight;
+
+      // Take a squared difference of them
+      distance += (valB - valA) * (valB - valA);
+
+      // Skip Bp if the relevant pixel doesn't exist yet.
+      if (dJ > 0) continue;
+      if (dJ == 0 && dI >= 0) continue;
+
+      distance += (valBp - valAp) * (valBp - valAp);
+    }
+  }
+
+  return distance;
+}
+
+static Location
+FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp) {
+  int region = 5;
+  Location p;
+
+  double minDist = DBL_MAX;
+  int minAI = -1;
+  int minAJ = -1;
+
+  // Loop through A, storing the best match aI, aJ for region bI, bJ
+  for (int aI = 3; aI < A->Width() - 3; aI++) {
+    for (int aJ = 3; aJ < A->Height() - 3; aJ++) {
+      double dist = CalculateDistanceBrute(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
+      if (dist < minDist) {
+        minAI = aI;
+        minAJ = aJ;
+        minDist = dist;
+      }
+    }
+  }
+
+  p.i = minAI;
+  p.j = minAJ;
+
+  return p;
+}
+
+static void
+RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
+                const R2Image *B, R2Image *Bp)
+{
+  for (int bI = 0; bI < B->Width(); bI++) {
+    printf("%d out of %d\n", bI, B->Width());
+    for (int bJ = 0; bJ < B->Height(); bJ++) {
+      Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
+      int aI = a.i;
+      int aJ = a.j;
+
+      R2Pixel pixelB = B->Pixel(bI, bJ);
+      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+
+      R2Pixel p;
+      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      Bp->SetPixel(bI, bJ, p);
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // ANN methods
 
 static void
@@ -232,10 +322,48 @@ Query(int bI, int bJ, const R2Image *B, R2Image *Bp)
   return l;
 }
 
+static Location
+CoherenceMatch(int bI, int bJ,
+               const R2Image *A, const R2Image *Ap,
+               const R2Image *B, const R2Image *Bp,
+               Location **sources)
+{
+  double minDist = DBL_MAX;
+  Location minLoc;
+
+  for (int dJ = -1; dJ <= 0; dJ ++) {
+    for (int dI = -1; dI <= 1; dI ++) {
+      if (dJ > 0) break;
+      if (dJ == 0 && dI >= 0) break;
+
+      if (OutOfBounds(bI + dI, bJ + dJ, B)) {
+        continue;
+      }
+
+      Location a = sources[bI + dI][bJ + dJ];
+      int aI = a.i - dI;
+      int aJ = a.j - dJ;
+
+      if (OutOfBounds(aI, aJ, B)) {
+        continue;
+      }
+
+      double dist = CalculateDistanceBrute(aI, aJ, bI, bJ, A, Ap, B, Bp, 5);
+      if (dist < minDist) {
+        minDist = dist;
+        minLoc.i = aI;
+        minLoc.j = aJ;
+      }
+    }
+  }
+
+  return minLoc;
+}
+
 static void
 RunAnalogyANN(const R2Image *A, const R2Image *Ap,
               const R2Image *B, R2Image *Bp,
-              Location **sources)
+              double coherence, Location **sources)
 {
   ANNSearch *searcher = new ANNSearch(A, Ap);
 
@@ -244,11 +372,24 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
     printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
       // Record the source of the pixel
-      Location l = searcher->Query(bI, bJ, B, Bp);
+      Location annMatch = searcher->Query(bI, bJ, B, Bp);
+      Location cohMatch = CoherenceMatch(bI, bJ, A, Ap, B, Bp, sources);
 
-      int aI = l.i;
-      int aJ = l.j;
-      sources[bI][bJ] = l;
+      double annDist = CalculateDistanceBrute(annMatch.i, annMatch.j,
+                                              bI, bJ, A, Ap, B, Bp, 5);
+      double cohDist = CalculateDistanceBrute(cohMatch.i, cohMatch.j,
+                                              bI, bJ, A, Ap, B, Bp, 5);
+
+      int aI, aJ;
+      if (cohDist <= annDist * (1 + pow(2, 0) * coherence)) {
+        aI = cohMatch.i;
+        aJ = cohMatch.j;
+        sources[bI][bJ] = cohMatch;
+      } else {
+        aI = annMatch.i;
+        aJ = annMatch.j;
+        sources[bI][bJ] = annMatch;
+      }
 
       R2Pixel p;
       R2Pixel pixelAp = Ap->Pixel(aI, aJ);
@@ -259,94 +400,6 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
   }
 
   delete searcher;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Brute force methods
-
-double CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
-  const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp,
-  int regionSize)
-{
-  double distance = 0;
-
-  for (int regionI = 0; regionI < regionSize; regionI ++) {
-    for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
-      int dI = regionI - regionSize / 2;
-      int dJ = regionJ - regionSize / 2;
-
-      // Skip if this is out of bounds
-      if (OutOfBounds(aI + dI, aJ + dJ, A) ||
-          OutOfBounds(bI + dI, bJ + dJ, B)) {
-        continue;
-      }
-
-      // Get all relevant values
-      double valWeight = Gauss(dI, dJ, regionSize);
-      double valA  = GetLuminosity(aI + dI, aJ + dJ, A)  * valWeight;
-      double valAp = GetLuminosity(aI + dI, aJ + dJ, Ap) * valWeight;
-      double valB  = GetLuminosity(bI + dI, bJ + dJ, B)  * valWeight;
-      double valBp = GetLuminosity(bI + dI, bJ + dJ, Bp) * valWeight;
-
-      // Take a squared difference of them
-      distance += (valB - valA) * (valB - valA);
-
-      // Skip Bp if the relevant pixel doesn't exist yet.
-      if (dJ > 0) continue;
-      if (dJ == 0 && dI >= 0) continue;
-
-      distance += (valBp - valAp) * (valBp - valAp);
-    }
-  }
-
-  return distance;
-}
-
-Location FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2Image *B, R2Image *Bp) {
-  int region = 5;
-  Location p;
-
-  double minDist = DBL_MAX;
-  int minAI = -1;
-  int minAJ = -1;
-
-  // Loop through A, storing the best match aI, aJ for region bI, bJ
-  for (int aI = 3; aI < A->Width() - 3; aI++) {
-    for (int aJ = 3; aJ < A->Height() - 3; aJ++) {
-      double dist = CalculateDistanceBrute(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
-      if (dist < minDist) {
-        minAI = aI;
-        minAJ = aJ;
-        minDist = dist;
-      }
-    }
-  }
-
-  p.i = minAI;
-  p.j = minAJ;
-
-  return p;
-}
-
-static void
-RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
-                const R2Image *B, R2Image *Bp)
-{
-  for (int bI = 0; bI < B->Width(); bI++) {
-    printf("%d out of %d\n", bI, B->Width());
-    for (int bJ = 0; bJ < B->Height(); bJ++) {
-      Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
-      int aI = a.i;
-      int aJ = a.j;
-
-      R2Pixel pixelB = B->Pixel(bI, bJ);
-      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
-
-      R2Pixel p;
-      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
-      Bp->SetPixel(bI, bJ, p);
-    }
-  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -372,7 +425,7 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   }
 
   // RunAnalogyBrute(newA, newAp, B, Bp);
-  RunAnalogyANN(newA, newAp, B, Bp, sources);
+  RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
 
   R2Image *sourcesImage = new R2Image(*Bp);
   for (int bI = 0; bI < B->Width(); bI++) {
