@@ -139,28 +139,31 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
 {
   int regionSize = 5;
   int regionDim = regionSize * regionSize;
-  int imagePixels = A->Width() * A->Height();
 
-  int regionDimPartial = ceil(regionDim * 0.5);
+  int regionDimPartial = floor(regionDim * 0.5);
   int searchDimensions = regionDim + regionDimPartial;
 
   printf("Caching all vectors from A, Ap\n");
 
-  // Cache all the A and Ap feature vectors
-  ANNpointArray vectorsA;
-  vectorsA = annAllocPts(imagePixels, searchDimensions);
-  for (int aI = 0; aI < A->Width(); aI++) {
-    for (int aJ = 0; aJ < A->Height(); aJ++) {
-      int index  = (aI * A->Height() + aJ);
+  int offset = (regionSize / 2);
+  int AWidth = A->Width() - 2 * offset;
+  int AHeight = A->Height() - 2 * offset;
+  int numVectors = (A->Width() - 2 * offset) * (A->Height() - 2 * offset);
 
-      GetVector(aI, aJ, A,  regionSize, &vectorsA[index][0], regionDim);
-      GetVector(aI, aJ, Ap, regionSize, &vectorsA[index][regionDim], regionDimPartial);
+  ANNpointArray vectorsA;
+  vectorsA = annAllocPts(numVectors, searchDimensions);
+  for (int aI = 0; aI < AWidth; aI++) {
+    for (int aJ = 0; aJ < AHeight; aJ++) {
+      int index  = (aI * AHeight + aJ);
+
+      GetVector(aI + offset, aJ + offset, A,  regionSize, &vectorsA[index][0], regionDim);
+      GetVector(aI + offset, aJ + offset, Ap, regionSize, &vectorsA[index][regionDim], regionDimPartial);
     }
   }
 
   printf("Generating kd tree\n");
 
-  ANNkd_tree *kdTree = new ANNkd_tree(vectorsA, imagePixels, searchDimensions);
+  ANNkd_tree *kdTree = new ANNkd_tree(vectorsA, numVectors, searchDimensions);
 
   int numNN = 1; // nearest neighbors
   ANNidxArray nnIdx = new ANNidx[numNN];
@@ -183,17 +186,14 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
 
       kdTree->annkSearch(queryPoint, numNN, nnIdx, nnDists, errorBound);
 
-      int aI = (int) (nnIdx[0] / A->Height());
-      int aJ = nnIdx[0] % A->Height();
-
-      // printf("%d, %d\n", aI, aJ);
+      int aI = (int) (nnIdx[0] / AHeight) + offset;
+      int aJ = nnIdx[0] % AHeight + offset;
 
       R2Pixel pixelAp = Ap->Pixel(aI, aJ);
       R2Pixel pixelB = B->Pixel(bI, bJ);
 
       R2Pixel p;
-      p.SetYIQ(pixelAp.Y(), 0, 0);
-      // p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
     }
   }
@@ -259,7 +259,6 @@ Location FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap,
         minAI = aI;
         minAJ = aJ;
         minDist = dist;
-        printf("%d, %d for %d, %d : %f\n", aI, aJ, bI, bJ, dist);
       }
     }
   }
@@ -275,7 +274,7 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
                 const R2Image *B, R2Image *Bp)
 {
   for (int bI = 0; bI < B->Width(); bI++) {
-    printf("%d out of %d\n", bI, B->Width() - 3);
+    printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
       Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
       int aI = a.i;
@@ -286,7 +285,6 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
 
       R2Pixel p;
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
-      // p.SetYIQ(pixelAp.Y(), 0, 0);
       Bp->SetPixel(bI, bJ, p);
     }
   }
@@ -309,8 +307,8 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   R2Image *newAp = new R2Image(*Ap);
   RemapLuminance(newA, newAp, B);
 
-  RunAnalogyBrute(newA, newAp, B, Bp);
-  // RunAnalogyANN(newA, newAp, B, Bp);
+  // RunAnalogyBrute(newA, newAp, B, Bp);
+  RunAnalogyANN(newA, newAp, B, Bp);
 
   // Return Bp image
   return Bp;
