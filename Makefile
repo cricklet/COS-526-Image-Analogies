@@ -37,7 +37,7 @@ all: \
         output/blur.bmp  \
 	output/emboss.bmp \
 	output/synth1.bmp
-	
+
 clean:
 	cd src; make clean
 	rm -f output/*

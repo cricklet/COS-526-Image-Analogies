@@ -20,6 +20,7 @@ static char *A_filename = NULL;
 static char *Ap_filename = NULL;
 static char *B_filename = NULL;
 static char *Bp_filename = NULL;
+static char *Bs_filename = NULL;
 static R2Pixel mask_color = R2blue_pixel;
 static int neighborhood_size = 5;
 
@@ -135,15 +136,16 @@ GetVector(int aI, int aJ, const R2Image *A, int regionSize,
 
 static void
 RunAnalogyANN(const R2Image *A, const R2Image *Ap,
-              const R2Image *B, R2Image *Bp)
+              const R2Image *B, R2Image *Bp,
+              Location **sources)
 {
+  // Search parameters
   int regionSize = 5;
   int regionDim = regionSize * regionSize;
-
   int regionDimPartial = floor(regionDim * 0.5);
   int searchDimensions = regionDim + regionDimPartial;
 
-  printf("Caching all vectors from A, Ap\n");
+  printf("Generating kd tree of vectors from A & Ap\n");
 
   int offset = (regionSize / 2);
   int AWidth = A->Width() - 2 * offset;
@@ -161,44 +163,44 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
     }
   }
 
-  printf("Generating kd tree\n");
-
   ANNkd_tree *kdTree = new ANNkd_tree(vectorsA, numVectors, searchDimensions);
 
   int numNN = 1; // nearest neighbors
   ANNidxArray nnIdx = new ANNidx[numNN];
   ANNdistArray nnDists = new ANNdist[numNN];
   double errorBound = 0;
-
   ANNpoint queryPoint = annAllocPt(searchDimensions);
 
   printf("Generating Bp\n");
   for (int bI = 0; bI < B->Width(); bI++) {
     printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
+      // Query via ANN
       GetVector(bI, bJ, B,  regionSize, &queryPoint[0], regionDim);
       GetVector(bI, bJ, Bp, regionSize, &queryPoint[regionDim], regionDimPartial);
-
-      // for (int i = 0; i < searchDimensions; i ++) {
-      //   printf("%f ", queryPoint[i]);
-      // }
-      // printf("\n");
-
       kdTree->annkSearch(queryPoint, numNN, nnIdx, nnDists, errorBound);
 
+      // Where (in Ap) to get the pixel for Bp
       int aI = (int) (nnIdx[0] / AHeight) + offset;
       int aJ = nnIdx[0] % AHeight + offset;
 
-      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
-      R2Pixel pixelB = B->Pixel(bI, bJ);
+      // Record the source of the pixel
+      Location l;
+      l.i = aI;
+      l.j = aJ;
+      sources[bI][bJ] = l;
 
       R2Pixel p;
+      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+      R2Pixel pixelB = B->Pixel(bI, bJ);
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
     }
   }
 
   delete kdTree;
+  delete nnIdx;
+  delete nnDists;
   annClose();
 }
 
@@ -307,8 +309,35 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   R2Image *newAp = new R2Image(*Ap);
   RemapLuminance(newA, newAp, B);
 
+  Location **sources = new Location *[Bp->Width()];
+  for (int i = 0; i < Bp->Width(); i ++) {
+    sources[i] = new Location[Bp->Height()];
+  }
+
   // RunAnalogyBrute(newA, newAp, B, Bp);
-  RunAnalogyANN(newA, newAp, B, Bp);
+  RunAnalogyANN(newA, newAp, B, Bp, sources);
+
+  R2Image *sourcesImage = new R2Image(*Bp);
+  for (int bI = 0; bI < B->Width(); bI++) {
+    for (int bJ = 0; bJ < B->Height(); bJ++) {
+      Location a = sources[bI][bJ];
+      double aI = a.i;
+      double aJ = a.j;
+
+      R2Pixel p;
+      p.SetRed(aI / B->Width());
+      p.SetGreen(aJ / B->Height());
+      sourcesImage->SetPixel(bI, bJ, p);
+    }
+  }
+
+  sourcesImage->Write(Bs_filename);
+
+  delete sourcesImage;
+  delete newA;
+  delete newAp;
+  for (int i = 0; i < Bp->Width(); i ++) delete sources[i];
+  delete sources;
 
   // Return Bp image
   return Bp;
@@ -362,6 +391,12 @@ ParseArgs(int argc, char **argv)
     fprintf(stderr, "Usage: analogy A A\' B B\'[-mask_color r g b] [-neighborhood_size npixels]\n");
     return 0;
   }
+
+  Bs_filename = new char[strlen(Bp_filename) + 4];
+  strcpy(Bs_filename, Bp_filename);
+  strstr(Bs_filename, ".bmp")[0] = '\0';
+  strcat(Bs_filename, ".src.bmp");
+  printf("%s\n", Bs_filename);
 
   // Return success
   return 1;
