@@ -135,59 +135,119 @@ GetVector(int aI, int aJ, const R2Image *A, int regionSize,
 }
 
 static void
-RunAnalogyANN(const R2Image *A, const R2Image *Ap,
-              const R2Image *B, R2Image *Bp,
-              Location **sources)
+GetConcattedVector(int aI, int aJ, const R2Image *A, const R2Image *Ap,
+                   int region, double *vector, int dim1, int dim2)
+{
+  GetVector(aI, aJ, A,  region, &vector[0], dim1);
+  GetVector(aI, aJ, Ap, region, &vector[dim1], dim2);
+}
+
+class ANNSearch {
+public:
+  ANNSearch(const R2Image *A, const R2Image *Ap);
+  ~ANNSearch();
+  Location Query(int bI, int bJ, const R2Image *B, R2Image *Bp);
+  void GetVector(int bI, int bJ, const R2Image *Bp);
+
+private:
+  ANNkd_tree *kdTree;
+  int numNN;
+  ANNidx *nnIdx;
+  ANNdist *nnDists;
+  int errorBound;
+  ANNpoint queryPoint;
+  int regionSize;
+
+  int regionDim;
+  int regionDimPartial;
+  int offset;
+  int AWidth;
+  int AHeight;
+
+  // I'd much prefer to avoid using OOP here and generate anonymous functions
+  // instead, but I don't know how to do that in C++...
+};
+
+ANNSearch::
+~ANNSearch()
+{
+  annClose();
+  delete this->kdTree;
+  delete this->nnIdx;
+  delete this->nnDists;
+  annDeallocPt(this->queryPoint);
+}
+
+ANNSearch::
+ANNSearch(const R2Image *A, const R2Image *Ap)
 {
   // Search parameters
-  int regionSize = 5;
-  int regionDim = regionSize * regionSize;
-  int regionDimPartial = floor(regionDim * 0.5);
-  int searchDimensions = regionDim + regionDimPartial;
+  this->regionSize = 5;
+  this->regionDim = regionSize * regionSize;
+  this->regionDimPartial = floor(regionDim * 0.5);
+  this->offset = regionSize / 2;
+
+  int searchDim = regionDim + regionDimPartial;
 
   printf("Generating kd tree of vectors from A & Ap\n");
+  this->AWidth = A->Width() - 2 * offset;
+  this->AHeight = A->Height() - 2 * offset;
 
-  int offset = (regionSize / 2);
-  int AWidth = A->Width() - 2 * offset;
-  int AHeight = A->Height() - 2 * offset;
   int numVectors = (A->Width() - 2 * offset) * (A->Height() - 2 * offset);
 
-  ANNpointArray vectorsA;
-  vectorsA = annAllocPts(numVectors, searchDimensions);
+  ANNpointArray vectorsA = annAllocPts(numVectors, searchDim);
   for (int aI = 0; aI < AWidth; aI++) {
     for (int aJ = 0; aJ < AHeight; aJ++) {
       int index  = (aI * AHeight + aJ);
 
-      GetVector(aI + offset, aJ + offset, A,  regionSize, &vectorsA[index][0], regionDim);
-      GetVector(aI + offset, aJ + offset, Ap, regionSize, &vectorsA[index][regionDim], regionDimPartial);
+      GetConcattedVector(aI + offset, aJ + offset, A, Ap, regionSize,
+          &vectorsA[index][0], regionDim, regionDimPartial);
     }
   }
 
-  ANNkd_tree *kdTree = new ANNkd_tree(vectorsA, numVectors, searchDimensions);
+  // Prep kd tree
+  this->kdTree = new ANNkd_tree(vectorsA, numVectors, searchDim);
 
-  int numNN = 1; // nearest neighbors
-  ANNidxArray nnIdx = new ANNidx[numNN];
-  ANNdistArray nnDists = new ANNdist[numNN];
-  double errorBound = 0;
-  ANNpoint queryPoint = annAllocPt(searchDimensions);
+  // Prep nearest neighbor search
+  this->numNN = 1;
+  this->nnIdx = new ANNidx[numNN];
+  this->nnDists = new ANNdist[numNN];
+  this->errorBound = 0;
+  this->queryPoint = annAllocPt(searchDim);
+
+  annDeallocPts(vectorsA);
+}
+
+Location ANNSearch::
+Query(int bI, int bJ, const R2Image *B, R2Image *Bp)
+{
+  GetConcattedVector(bI, bJ, B, Bp, regionSize,
+      &queryPoint[0], regionDim, regionDimPartial);
+  kdTree->annkSearch(queryPoint, numNN, nnIdx, nnDists, errorBound);
+
+  Location l;
+  l.i = (int) (nnIdx[0] / AHeight) + offset;
+  l.j = nnIdx[0] % AHeight + offset;
+
+  return l;
+}
+
+static void
+RunAnalogyANN(const R2Image *A, const R2Image *Ap,
+              const R2Image *B, R2Image *Bp,
+              Location **sources)
+{
+  ANNSearch *searcher = new ANNSearch(A, Ap);
 
   printf("Generating Bp\n");
   for (int bI = 0; bI < B->Width(); bI++) {
     printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
-      // Query via ANN
-      GetVector(bI, bJ, B,  regionSize, &queryPoint[0], regionDim);
-      GetVector(bI, bJ, Bp, regionSize, &queryPoint[regionDim], regionDimPartial);
-      kdTree->annkSearch(queryPoint, numNN, nnIdx, nnDists, errorBound);
-
-      // Where (in Ap) to get the pixel for Bp
-      int aI = (int) (nnIdx[0] / AHeight) + offset;
-      int aJ = nnIdx[0] % AHeight + offset;
-
       // Record the source of the pixel
-      Location l;
-      l.i = aI;
-      l.j = aJ;
+      Location l = searcher->Query(bI, bJ, B, Bp);
+
+      int aI = l.i;
+      int aJ = l.j;
       sources[bI][bJ] = l;
 
       R2Pixel p;
@@ -198,10 +258,7 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
     }
   }
 
-  delete kdTree;
-  delete nnIdx;
-  delete nnDists;
-  annClose();
+  delete searcher;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
