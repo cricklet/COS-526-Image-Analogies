@@ -117,13 +117,14 @@ GetVector(int aI, int aJ, const R2Image *A, int regionSize,
       int dI = regionI - regionSize / 2;
       int dJ = regionJ - regionSize / 2;
 
-      // Skip if this is out of bounds
-      if (OutOfBounds(aI + dI, aJ + dJ, A)) {
+      // Skip if the relevant pixel doesn't exist yet.
+      if (regionIndex >= dimension) {
         continue;
       }
 
-      // Skip if the relevant pixel doesn't exist yet.
-      if (regionIndex >= dimension) {
+      // Skip if this is out of bounds
+      if (OutOfBounds(aI + dI, aJ + dJ, A)) {
+        vector[regionIndex] = 0;
         continue;
       }
 
@@ -191,7 +192,8 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
       R2Pixel pixelB = B->Pixel(bI, bJ);
 
       R2Pixel p;
-      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      p.SetYIQ(pixelAp.Y(), 0, 0);
+      // p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
     }
   }
@@ -217,14 +219,15 @@ double CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
       // Skip if this is out of bounds
       if (OutOfBounds(aI + dI, aJ + dJ, A) ||
           OutOfBounds(bI + dI, bJ + dJ, B)) {
-         continue;
+        continue;
       }
 
       // Get all relevant values
-      double valA  = GetLuminosity(aI + dI, aJ + dJ, A);
-      double valAp = GetLuminosity(aI + dI, aJ + dJ, Ap);
-      double valB  = GetLuminosity(aI + dI, aJ + dJ, B);
-      double valBp = GetLuminosity(aI + dI, aJ + dJ, Bp);
+      double valWeight = Gauss(dI, dJ, regionSize);
+      double valA  = GetLuminosity(aI + dI, aJ + dJ, A)  * valWeight;
+      double valAp = GetLuminosity(aI + dI, aJ + dJ, Ap) * valWeight;
+      double valB  = GetLuminosity(bI + dI, bJ + dJ, B)  * valWeight;
+      double valBp = GetLuminosity(bI + dI, bJ + dJ, Bp) * valWeight;
 
       // Take a squared difference of them
       distance += (valB - valA) * (valB - valA);
@@ -244,17 +247,19 @@ Location FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap,
   int region = 5;
   Location p;
 
-  double minDist = INT_MAX;
+  double minDist = DBL_MAX;
   int minAI = -1;
   int minAJ = -1;
 
   // Loop through A, storing the best match aI, aJ for region bI, bJ
-  for (int aI = 0; aI < A->Width(); aI++) {
-    for (int aJ = 0; aJ < A->Height(); aJ++) {
+  for (int aI = 3; aI < A->Width() - 3; aI++) {
+    for (int aJ = 3; aJ < A->Height() - 3; aJ++) {
       double dist = CalculateDistanceBrute(aI, aJ, bI, bJ, A, Ap, B, Bp, region);
       if (dist < minDist) {
         minAI = aI;
         minAJ = aJ;
+        minDist = dist;
+        printf("%d, %d for %d, %d : %f\n", aI, aJ, bI, bJ, dist);
       }
     }
   }
@@ -270,7 +275,7 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
                 const R2Image *B, R2Image *Bp)
 {
   for (int bI = 0; bI < B->Width(); bI++) {
-    printf("%d out of %d\n", bI, B->Width());
+    printf("%d out of %d\n", bI, B->Width() - 3);
     for (int bJ = 0; bJ < B->Height(); bJ++) {
       Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
       int aI = a.i;
@@ -281,6 +286,7 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
 
       R2Pixel p;
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      // p.SetYIQ(pixelAp.Y(), 0, 0);
       Bp->SetPixel(bI, bJ, p);
     }
   }
@@ -303,8 +309,8 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   R2Image *newAp = new R2Image(*Ap);
   RemapLuminance(newA, newAp, B);
 
-  // RunAnalogyBrute(newA, newAp, B, Bp);
-  RunAnalogyANN(newA, newAp, B, Bp);
+  RunAnalogyBrute(newA, newAp, B, Bp);
+  // RunAnalogyANN(newA, newAp, B, Bp);
 
   // Return Bp image
   return Bp;
