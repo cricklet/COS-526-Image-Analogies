@@ -14,6 +14,17 @@
 #include "R2Pixel.h"
 #include "R2Image.h"
 
+// Program arguments
+
+static char *A_filename = NULL;
+static char *Ap_filename = NULL;
+static char *B_filename = NULL;
+static char *Bp_filename = NULL;
+static R2Pixel mask_color = R2blue_pixel;
+static int neighborhood_size = 5;
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct Location {
   int i; int j;
 };
@@ -28,16 +39,81 @@ double GetLuminosity(int i, int j, const R2Image *image)
   return image->Pixel(i, j).Y();
 }
 
+double Gauss(int dI, int dJ, int regionSize)
+{
+  double distSq = dI * dI + dJ * dJ;
+  double sigmaSq = regionSize * 0.4;
+  double gauss = exp(- distSq / sigmaSq);
+  return gauss;
+  // return 1;
+}
+
+static double
+CalculateMeanLuminance(const R2Image *A)
+{
+  double lumSum = 0;
+  for (int aI = 0; aI < A->Width(); aI++) {
+    for (int aJ = 0; aJ < A->Height(); aJ++) {
+      lumSum += GetLuminosity(aI, aJ, A);
+    }
+  }
+
+  return lumSum / (A->Width() * A->Height());
+}
+
+static double
+CalculateStdDev(const R2Image *A, double mean)
+{
+  double variance = 0;
+  for (int aI = 0; aI < A->Width(); aI++) {
+    for (int aJ = 0; aJ < A->Height(); aJ++) {
+      double diff = GetLuminosity(aI, aJ, A) - mean;
+      variance += diff * diff;
+    }
+  }
+
+  return sqrt(variance / (A->Width() * A->Height()));
+}
+
+static void
+RemapLuminance(R2Image *A, double meanA, double stdDevA, double meanB, double stdDevB)
+{
+  printf("%f, %f, %f, %f\n", meanA, stdDevA, meanB, stdDevB);
+  for (int aI = 0; aI < A->Width(); aI++) {
+    for (int aJ = 0; aJ < A->Height(); aJ++) {
+      R2Pixel o = A->Pixel(aI, aJ);
+      double newY = (stdDevB / stdDevA) * (o.Y() - meanA) + meanB;
+
+      R2Pixel p;
+      p.SetYIQ(newY, o.I(), o.Q());
+      A->SetPixel(aI, aJ, p);
+    }
+  }
+}
+
+static void
+RemapLuminance(R2Image *A, R2Image *Ap, const R2Image *B)
+{
+  double meanA = CalculateMeanLuminance(A);
+  double meanB = CalculateMeanLuminance(B);
+
+  double stdDevA = CalculateStdDev(A, meanA);
+  double stdDevB = CalculateStdDev(B, meanB);
+
+  RemapLuminance(A,  meanA, stdDevA, meanB, stdDevB);
+  RemapLuminance(Ap, meanA, stdDevA, meanB, stdDevB);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // ANN methods
 
-double *GetVector(int aI, int aJ, const R2Image *A, int regionSize,
-                  bool skipLaterPixels = false)
+static void
+GetVector(int aI, int aJ, const R2Image *A, int regionSize,
+          double *vector, int dimension)
 {
-  double *vector = new double[regionSize * regionSize];
-
   for (int regionI = 0; regionI < regionSize; regionI ++) {
     for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
+      int regionIndex = regionI * regionSize + regionJ;
       int dI = regionI - regionSize / 2;
       int dJ = regionJ - regionSize / 2;
 
@@ -47,16 +123,13 @@ double *GetVector(int aI, int aJ, const R2Image *A, int regionSize,
       }
 
       // Skip if the relevant pixel doesn't exist yet.
-      if (skipLaterPixels) {
-        if (dJ > 0) continue;
-        if (dJ == 0 && dI >= 0) continue;
+      if (regionIndex >= dimension) {
+        continue;
       }
 
-      vector[regionI * regionSize + regionJ] = GetLuminosity(aI + dI, aJ + dJ, A);
+      vector[regionIndex] = GetLuminosity(aI + dI, aJ + dJ, A) * Gauss(dI, dJ, regionSize);
     }
   }
-
-  return vector;
 }
 
 static void
@@ -64,33 +137,67 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
               const R2Image *B, R2Image *Bp)
 {
   int regionSize = 5;
+  int regionDim = regionSize * regionSize;
+  int imagePixels = A->Width() * A->Height();
+
+  int regionDimPartial = ceil(regionDim * 0.5);
+  int searchDimensions = regionDim + regionDimPartial;
+
+  printf("Caching all vectors from A, Ap\n");
 
   // Cache all the A and Ap feature vectors
-  double **vectorsA  = new double *[A->Width()  * A->Height() ];
-  double **vectorsAp = new double *[Ap->Width() * Ap->Height()];
+  ANNpointArray vectorsA;
+  vectorsA = annAllocPts(imagePixels, searchDimensions);
   for (int aI = 0; aI < A->Width(); aI++) {
     for (int aJ = 0; aJ < A->Height(); aJ++) {
-      printf("%d, %d => %d out of %d (%d * %d)\n", aI, aJ, (aI * A->Width() + aJ), (A->Width()  * A->Height()), A->Width(), A->Height());
-      vectorsA [aI * A->Height() + aJ] = GetVector(aI, aJ, A,  regionSize);
-      vectorsAp[aI * A->Height() + aJ] = GetVector(aI, aJ, Ap, regionSize);
+      int index  = (aI * A->Height() + aJ);
+
+      GetVector(aI, aJ, A,  regionSize, &vectorsA[index][0], regionDim);
+      GetVector(aI, aJ, Ap, regionSize, &vectorsA[index][regionDim], regionDimPartial);
     }
   }
 
+  printf("Generating kd tree\n");
+
+  ANNkd_tree *kdTree = new ANNkd_tree(vectorsA, imagePixels, searchDimensions);
+
+  int numNN = 1; // nearest neighbors
+  ANNidxArray nnIdx = new ANNidx[numNN];
+  ANNdistArray nnDists = new ANNdist[numNN];
+  double errorBound = 0;
+
+  ANNpoint queryPoint = annAllocPt(searchDimensions);
+
+  printf("Generating Bp\n");
   for (int bI = 0; bI < B->Width(); bI++) {
     printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
-      Location a = FindBestMatchBrute(bI, bJ, A, Ap, B, Bp);
-      int aI = a.i;
-      int aJ = a.j;
+      GetVector(bI, bJ, B,  regionSize, &queryPoint[0], regionDim);
+      GetVector(bI, bJ, Bp, regionSize, &queryPoint[regionDim], regionDimPartial);
 
-      R2Pixel pixelB = B->Pixel(bI, bJ);
+      // for (int i = 0; i < searchDimensions; i ++) {
+      //   printf("%f ", queryPoint[i]);
+      // }
+      // printf("\n");
+
+      kdTree->annkSearch(queryPoint, numNN, nnIdx, nnDists, errorBound);
+
+      int aI = (int) (nnIdx[0] / A->Height());
+      int aJ = nnIdx[0] % A->Height();
+
+      // printf("%d, %d\n", aI, aJ);
+
       R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+      R2Pixel pixelB = B->Pixel(bI, bJ);
 
       R2Pixel p;
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
     }
   }
+
+  delete kdTree;
+  annClose();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -192,23 +299,18 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
     exit(-1);
   }
 
-  // RunAnalogyBrute(A, Ap, B, Bp);
-  RunAnalogyANN(A, Ap, B, Bp);
+  R2Image *newA  = new R2Image(*A);
+  R2Image *newAp = new R2Image(*Ap);
+  RemapLuminance(newA, newAp, B);
+
+  // RunAnalogyBrute(newA, newAp, B, Bp);
+  RunAnalogyANN(newA, newAp, B, Bp);
 
   // Return Bp image
   return Bp;
 }
 
 
-
-// Program arguments
-
-static char *A_filename = NULL;
-static char *Ap_filename = NULL;
-static char *B_filename = NULL;
-static char *Bp_filename = NULL;
-static R2Pixel mask_color = R2blue_pixel;
-static int neighborhood_size = 5;
 
 static R2Image *
 ReadImage(const char *filename)
