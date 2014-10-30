@@ -4,7 +4,7 @@
 
 
 
-# 
+#
 # List of source files
 #
 
@@ -18,7 +18,7 @@ ANALOGY_OBJS=$(ANALOGY_SRCS:.cpp=.o)
 #
 
 CC=g++
-CPPFLAGS=-Wall -I. -g
+CPPFLAGS=-Wall -I. -g -std=c++11 -Wc++11-extensions
 LDFLAGS=-g
 
 
@@ -54,23 +54,17 @@ LIBS=jpeg/libjpeg.a ANN/libANN.a
 
 all: $(LIBS) analogy
 
-analogy: $(LIBS) $(ANALOGY_OBJS) 
+analogy: $(LIBS) $(ANALOGY_OBJS)
 	    $(CC) -o analogy $(CPPFLAGS) $(LDFLAGS) $(ANALOGY_OBJS) $(LIBS) -lm
 
-jpeg/libjpeg.a: 
+jpeg/libjpeg.a:
 	    cd jpeg; make
 
-ANN/libANN.a: 
+ANN/libANN.a:
 	    cd ANN; make
 
 clean:
 	    ${RM} -f */*.a */*/*.a *.o */*.o */*/*.o analogy analogy.exe $(LIBS)
 
 distclean:  clean
-	    ${RM} -f *~ 
-
-
-
-
-
-
+	    ${RM} -f *~
