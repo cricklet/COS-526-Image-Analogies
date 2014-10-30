@@ -44,9 +44,14 @@ bool OutOfBounds(int i, int j, int width, int height, int boundary = 0)
 
 static Location
 GetLocationFromIndex(int index, int width, int height, int boundary = 0) {
-  int subHeight = height - boundary * 2;
-
   Location l;
+  if (index == -1) {
+    l.i = -1;
+    l.j = -1;
+    return l;
+  }
+
+  int subHeight = height - boundary * 2;
   l.i = (int) (index / subHeight) + boundary;
   l.j = index % subHeight + boundary;
   return l;
@@ -197,7 +202,7 @@ FindBestMatchBrute(ANNpointArray featuresA, int numA,
 
 static void
 RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
-                const R2Image *B, R2Image *Bp)
+                const R2Image *B, R2Image *Bp, Location **sources)
 {
   int regionSize = 5;
 
@@ -246,6 +251,8 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
       R2Pixel p;
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
+
+      sources[bI][bJ] = a;
     }
   }
 }
@@ -316,7 +323,7 @@ CoherenceMatch(int bI, int bJ, ANNpointArray featuresA,
                int regionSize, int dim, Location **sources)
 {
   double minDist = DBL_MAX;
-  int minIndexA;
+  int minIndexA = -1;
 
   // Compare coherence sources to this feature in B
   ANNpoint featureB = annAllocPt(dim);
@@ -330,6 +337,7 @@ CoherenceMatch(int bI, int bJ, ANNpointArray featuresA,
   for (int i = 0; i < numLocations; i ++) {
     Location a = locationsA[i];
     int indexA = GetIndexFromLocation(a.i, a.j, width, height, boundaryA);
+    if (indexA == -1) continue;
 
     ANNpoint featureA = featuresA[indexA];
 
@@ -343,6 +351,27 @@ CoherenceMatch(int bI, int bJ, ANNpointArray featuresA,
   return minIndexA;
 }
 
+static int
+ChooseBestMatch(int annIndex, int cohIndex, double coherence,
+                ANNpointArray featuresA, ANNpoint featureB, int dim)
+{
+  if (cohIndex == -1) {
+    return annIndex;
+  }
+
+  ANNpoint annFeature = featuresA[annIndex];
+  ANNpoint cohFeature = featuresA[cohIndex];
+
+  double annDist = GetFeatureDist(annFeature, featureB, dim);
+  double cohDist = GetFeatureDist(cohFeature, featureB, dim);
+
+  if (cohDist <= annDist * (1 + pow(2, 0) * coherence)) {
+    return cohIndex;
+  } else {
+    return annIndex;
+  }
+}
+
 static void
 RunAnalogyANN(const R2Image *A, const R2Image *Ap,
               const R2Image *B, R2Image *Bp,
@@ -352,7 +381,7 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
 
   // Dimensions of feature vectors & their constituents
   int dimA  = regionSize * regionSize;
-  int dimAp = floor(dimAp * 0.5);
+  int dimAp = floor(dimA * 0.5);
   int dim   = dimA + dimAp;
 
   int width = A->Width();
@@ -390,28 +419,13 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
                                     width, height, boundaryA, 0,
                                     regionSize, dim, sources);
 
-      Location annLoc = GetLocationFromIndex(annIndex, width, height, boundaryA);
-      Location cohLoc = GetLocationFromIndex(cohIndex, width, height, boundaryA);
-
-      ANNpoint annFeature = featuresA[annIndex];
-      ANNpoint cohFeature = featuresA[cohIndex];
-
-      double annDist = GetFeatureDist(annFeature, featureB, dim);
-      double cohDist = GetFeatureDist(cohFeature, featureB, dim);
-
-      int aI, aJ;
-      if (cohDist <= annDist * (1 + pow(2, 0) * coherence)) {
-        aI = cohLoc.i;
-        aJ = cohLoc.j;
-        sources[bI][bJ] = cohLoc;
-      } else {
-        aI = annLoc.i;
-        aJ = annLoc.j;
-        sources[bI][bJ] = annLoc;
-      }
+      int index = ChooseBestMatch(annIndex, cohIndex, coherence,
+                                  featuresA, featureB, dim);
+      Location a = GetLocationFromIndex(index, width, height, boundaryA);
+      sources[bI][bJ] = a;
 
       R2Pixel p;
-      R2Pixel pixelAp = Ap->Pixel(aI, aJ);
+      R2Pixel pixelAp = Ap->Pixel(a.i, a.j);
       R2Pixel pixelB = B->Pixel(bI, bJ);
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
@@ -529,7 +543,7 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
     sources[i] = new Location[Bp->Height()];
   }
 
-  // RunAnalogyBrute(newA, newAp, B, Bp);
+  // RunAnalogyBrute(newA, newAp, B, Bp, sources);
   RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
   // RunAnalogyMulti(newA, newAp, B, Bp, 0.2, sources, 4);
 
