@@ -93,9 +93,8 @@ double Gauss(int dI, int dJ, int regionSize)
 {
   double distSq = dI * dI + dJ * dJ;
   double sigmaSq = regionSize * 0.4;
-  double gauss = exp(- distSq / sigmaSq);
+  double gauss = exp(- distSq / sigmaSq); // not scaled correctly
   return gauss;
-  // return 1;
 }
 
 static double
@@ -404,6 +403,85 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Multi resolution
+
+static R2Image *
+CreateLowerResImage(const R2Image *A)
+{
+  // Create a lower res, blurred image
+  R2Image *B = new R2Image(A->Width() / 2, A->Height() / 2);
+
+  for (int bI = 0; bI < B->Width(); bI++) {
+    for (int bJ = 0; bJ < B->Height(); bJ++) {
+      int aI = (int) ((bI + 0.5) * 2);
+      int aJ = (int) ((bJ + 0.5) * 2);
+
+      double lumSum = 0;
+      double iSum = 0;
+      double qSum = 0;
+      double gaussSum = 0;
+
+      int radius = 2;
+      for (int dI = -radius; dI <= radius; dI ++) {
+        for (int dJ = -radius; dJ <= radius; dJ ++) {
+          if (OutOfBounds(aI + dI, aJ + dJ, A)) {
+            continue;
+          }
+
+          double gauss = Gauss(dI, dJ, 2 * radius);
+          R2Pixel a = A->Pixel(aI + dI, aJ + dJ);
+          lumSum += a.Y() * gauss;
+          iSum   += a.I() * gauss;
+          qSum   += a.Q() * gauss;
+          gaussSum += gauss;
+        }
+      }
+
+      R2Pixel b;
+      b.SetYIQ(lumSum / gaussSum, iSum / gaussSum, qSum / gaussSum);
+      B->SetPixel(bI, bJ, b);
+    }
+  }
+
+  return B;
+}
+
+static R2Image **
+CreateMultiResImages(const R2Image *A, int levels)
+{
+  R2Image **As  = new R2Image *[levels];
+  As[levels - 1] = new R2Image(*A);
+
+  for (int i = levels - 2; i >= 0; i --) {
+    As[i] = CreateLowerResImage(As[i + 1]);
+  }
+
+  return As;
+}
+
+static void
+RunAnalogyMulti(const R2Image *A, const R2Image *Ap,
+                const R2Image *B, const R2Image *Bp,
+                double coherence, Location **sources,
+                int levels)
+{
+  R2Image **As  = CreateMultiResImages(A, levels);
+  R2Image **Aps = CreateMultiResImages(Ap, levels);
+  R2Image **Bs  = CreateMultiResImages(B, levels);
+  R2Image **Bps = CreateMultiResImages(Bp, levels);
+
+  // for (int i = 0; i < levels; i ++) {
+  //   char *filename = new char[20];
+  //   strcpy(filename, Bp_filename);
+  //   strstr(filename, ".bmp")[0] = '\0';
+  //   strcat(filename, ".x.bmp");
+  //   strstr(filename, ".x.bmp")[1] = '0' + i;
+  //   printf("%s\n", filename);
+  //   Bs[i]->Write(filename);
+  // }
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Wrapper code
 
 static R2Image *
@@ -426,7 +504,8 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   }
 
   // RunAnalogyBrute(newA, newAp, B, Bp);
-  RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
+  // RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
+  RunAnalogyMulti(newA, newAp, B, Bp, 0.2, sources, 4);
 
   R2Image *sourcesImage = new R2Image(*Bp);
   for (int bI = 0; bI < B->Width(); bI++) {
