@@ -47,6 +47,18 @@ Location GetFeatureLocation(int index, Features &features)
   return l;
 }
 
+ANNpoint GetFeatureFromLocation(int aI, int aJ, Features &features)
+{
+  aI -= features.offset;
+  aJ -= features.offset;
+  return features.vectors[aI * features.height + aJ];
+}
+
+ANNpoint GetFeatureFromLocation(Location l, Features &features)
+{
+  return GetFeatureFromLocation(l.i, l.j, features);
+}
+
 double GetFeatureDist(ANNpoint v1, ANNpoint v2, int dim)
 {
   double dist = 0;
@@ -59,6 +71,17 @@ double GetFeatureDist(ANNpoint v1, ANNpoint v2, int dim)
 bool OutOfBounds(int i, int j, const R2Image *image)
 {
   return i < 0 || j < 0 || i >= image->Width() || j >= image->Height();
+}
+
+bool OutOfBounds(int i, int j, Features &features, bool check_offset = true)
+{
+  int off = 0;
+  if (check_offset) {
+    off = features.offset;
+  }
+  return i < off || j < off
+      || i >= features.width - off
+      || j >= features.height - off;
 }
 
 double GetLuminosity(int i, int j, const R2Image *image)
@@ -166,7 +189,7 @@ GetConcattedVector(int aI, int aJ, const R2Image *A, const R2Image *Ap,
 }
 
 static void
-GetFeature(ANNpoint queryPoint,
+GetFeature(ANNpoint bFeature,
            int bI, int bJ, const R2Image *B, const R2Image *Bp,
            int region, bool partial)
 {
@@ -175,7 +198,7 @@ GetFeature(ANNpoint queryPoint,
   if (partial) {
     dimAp = floor(dimAp * 0.5);
   }
-  GetConcattedVector(bI, bJ, B, Bp, region, queryPoint, dimA, dimAp);
+  GetConcattedVector(bI, bJ, B, Bp, region, bFeature, dimA, dimAp);
 }
 
 static Features
@@ -220,45 +243,6 @@ GetFeatures(const R2Image *A, const R2Image *Ap,
 ////////////////////////////////////////////////////////////////////////////////
 // Brute force methods
 
-static double
-CalculateDistanceBrute(int aI, int aJ, int bI, int bJ,
-  const R2Image *A, const R2Image *Ap, const R2Image *B, const R2Image *Bp,
-  int regionSize)
-{
-  double distance = 0;
-
-  for (int regionI = 0; regionI < regionSize; regionI ++) {
-    for (int regionJ = 0; regionJ < regionSize; regionJ ++) {
-      int dI = regionI - regionSize / 2;
-      int dJ = regionJ - regionSize / 2;
-
-      // Skip if this is out of bounds
-      if (OutOfBounds(aI + dI, aJ + dJ, A) ||
-          OutOfBounds(bI + dI, bJ + dJ, B)) {
-        continue;
-      }
-
-      // Get all relevant values
-      double valWeight = Gauss(dI, dJ, regionSize);
-      double valA  = GetLuminosity(aI + dI, aJ + dJ, A)  * valWeight;
-      double valAp = GetLuminosity(aI + dI, aJ + dJ, Ap) * valWeight;
-      double valB  = GetLuminosity(bI + dI, bJ + dJ, B)  * valWeight;
-      double valBp = GetLuminosity(bI + dI, bJ + dJ, Bp) * valWeight;
-
-      // Take a squared difference of them
-      distance += (valB - valA) * (valB - valA);
-
-      // Skip Bp if the relevant pixel doesn't exist yet.
-      if (dJ > 0) continue;
-      if (dJ == 0 && dI >= 0) continue;
-
-      distance += (valBp - valAp) * (valBp - valAp);
-    }
-  }
-
-  return distance;
-}
-
 static int
 FindBestMatchBrute(Features features, ANNpoint query) {
   double minDist = DBL_MAX;
@@ -280,12 +264,13 @@ FindBestMatchBrute(int bI, int bJ, const R2Image *A, const R2Image *Ap, const R2
 
   Features features = GetFeatures(A, Ap, region, true, 2);
 
-  ANNpoint queryPoint = annAllocPt(features.dim);
-  GetFeature(queryPoint, bI, bJ, B, Bp, region, true);
+  ANNpoint bFeature = annAllocPt(features.dim);
+  GetFeature(bFeature, bI, bJ, B, Bp, region, true);
 
-  int index = FindBestMatchBrute(features, queryPoint);
+  int index = FindBestMatchBrute(features, bFeature);
   Location loc = GetFeatureLocation(index, features);
 
+  annDeallocPt(bFeature);
   delete features.vectors;
   return loc;
 }
@@ -329,8 +314,8 @@ ANNMatch(ANNpoint queryPoint, ANNkd_tree *kdTree)
 
 static Location
 CoherenceMatch(int bI, int bJ,
-               const R2Image *A, const R2Image *Ap,
-               const R2Image *B, const R2Image *Bp,
+               ANNpoint bFeature,
+               Features &features,
                Location **sources)
 {
   double minDist = DBL_MAX;
@@ -338,10 +323,11 @@ CoherenceMatch(int bI, int bJ,
 
   for (int dJ = -1; dJ <= 0; dJ ++) {
     for (int dI = -1; dI <= 1; dI ++) {
+      // Skip parts of Bp that haven't been rendered yet
       if (dJ > 0) break;
       if (dJ == 0 && dI >= 0) break;
 
-      if (OutOfBounds(bI + dI, bJ + dJ, B)) {
+      if (OutOfBounds(bI + dI, bJ + dJ, features, false)) {
         continue;
       }
 
@@ -349,11 +335,12 @@ CoherenceMatch(int bI, int bJ,
       int aI = a.i - dI;
       int aJ = a.j - dJ;
 
-      if (OutOfBounds(aI, aJ, B)) {
+      if (OutOfBounds(aI, aJ, features)) {
         continue;
       }
 
-      double dist = CalculateDistanceBrute(aI, aJ, bI, bJ, A, Ap, B, Bp, 5);
+      ANNpoint aFeature = GetFeatureFromLocation(aI, aJ, features);
+      double dist = GetFeatureDist(aFeature, bFeature, features.dim);
       if (dist < minDist) {
         minDist = dist;
         minLoc.i = aI;
@@ -374,23 +361,24 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
   int Aoffset = 2;
   Features features = GetFeatures(A, Ap, region, true, Aoffset);
   ANNkd_tree *kdTree = new ANNkd_tree(features.vectors, features.num, features.dim);
-  ANNpoint queryPoint = annAllocPt(features.dim);
+  ANNpoint bFeature = annAllocPt(features.dim);
 
   printf("Generating Bp\n");
   for (int bI = 0; bI < B->Width(); bI++) {
     printf("%d out of %d\n", bI, B->Width());
     for (int bJ = 0; bJ < B->Height(); bJ++) {
       // Record the source of the pixel
-      GetFeature(queryPoint, bI, bJ, B, Bp, region, true);
-      int annIndex = ANNMatch(queryPoint, kdTree);
+      GetFeature(bFeature, bI, bJ, B, Bp, region, true);
+      int annIndex = ANNMatch(bFeature, kdTree);
 
       Location annLoc = GetFeatureLocation(annIndex, features);
-      Location cohLoc = CoherenceMatch(bI, bJ, A, Ap, B, Bp, sources);
+      Location cohLoc = CoherenceMatch(bI, bJ, bFeature, features, sources);
 
-      double annDist = CalculateDistanceBrute(annLoc.i, annLoc.j,
-                                              bI, bJ, A, Ap, B, Bp, 5);
-      double cohDist = CalculateDistanceBrute(cohLoc.i, cohLoc.j,
-                                              bI, bJ, A, Ap, B, Bp, 5);
+      ANNpoint annFeature = GetFeatureFromLocation(annLoc, features);
+      ANNpoint cohFeature = GetFeatureFromLocation(cohLoc, features);
+
+      double annDist = GetFeatureDist(annFeature, bFeature, features.dim);
+      double cohDist = GetFeatureDist(cohFeature, bFeature, features.dim);
 
       int aI, aJ;
       if (cohDist <= annDist * (1 + pow(2, 0) * coherence)) {
@@ -411,7 +399,7 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
     }
   }
 
-  annDeallocPt(queryPoint);
+  annDeallocPt(bFeature);
   delete features.vectors;
 }
 
