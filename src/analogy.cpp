@@ -181,6 +181,25 @@ FillFeature(double *output, int aI, int aJ, const R2Image *A, const R2Image *Ap,
   FillFeature(&output[dim1], aI, aJ, Ap, region, dim2);
 }
 
+static void
+FillFeature(double *output, int aI1, int aJ1,
+            const R2Image *A0,  const R2Image *A1,
+            const R2Image *Ap0, const R2Image *Ap1,
+            int region0, int region1,
+            int dimA0, int dimA1, int dimAp0, int dimAp1)
+{
+  double scaleI = (double) A0->Width()  / (double) A1->Width();
+  double scaleJ = (double) A0->Height() / (double) A1->Height();
+  int aI0 = (int) (aI1 * scaleI);
+  int aJ0 = (int) (aJ1 * scaleJ);
+
+  int index = 0;
+  FillFeature(&output[index], aI0, aJ0, A0,  region0, dimA0);  index += dimA0;
+  FillFeature(&output[index], aI1, aJ1, A1,  region1, dimA1);  index += dimA1;
+  FillFeature(&output[index], aI0, aJ0, Ap0, region0, dimAp0); index += dimAp0;
+  FillFeature(&output[index], aI1, aJ1, Ap1, region1, dimAp1); index += dimAp1;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Brute force methods
 
@@ -315,19 +334,13 @@ CoherencePossibleSources(int bI, int bJ, int regionSize,
   return possibleSources;
 }
 
-template<typename Func>
 static int
-CoherenceMatch(int bI, int bJ, ANNpointArray featuresA,
-               Func FillFeatureB,
+CoherenceMatch(int bI, int bJ, ANNpointArray featuresA, ANNpoint featureB,
                int width, int height, int boundaryA, int boundaryB,
                int regionSize, int dim, Location **sources)
 {
   double minDist = DBL_MAX;
   int minIndexA = -1;
-
-  // Compare coherence sources to this feature in B
-  ANNpoint featureB = annAllocPt(dim);
-  FillFeatureB(featureB, bI, bJ);
 
   // Get the possible coherence sources
   int numLocations = regionSize * regionSize;
@@ -389,8 +402,7 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
 
   // Only look at a subsection of A
   int boundaryA = (int) (regionSize / 2);
-  int numA = (A->Width()  - 2 * boundaryA)
-           * (A->Height() - 2 * boundaryA);
+  int numA = (width - 2 * boundaryA) * (height - 2 * boundaryA);
 
   auto FillFeatureA = [&](double *output, int aI, int aJ) {
     return FillFeature(output, aI, aJ, A, Ap, regionSize, dimA, dimAp);
@@ -415,7 +427,7 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
       FillFeatureB(featureB, bI, bJ);
 
       int annIndex = ANNMatch(featureB, treeA);
-      int cohIndex = CoherenceMatch(bI, bJ, featuresA, FillFeatureB,
+      int cohIndex = CoherenceMatch(bI, bJ, featuresA, featureB,
                                     width, height, boundaryA, 0,
                                     regionSize, dim, sources);
 
@@ -496,29 +508,118 @@ CreateMultiResImages(const R2Image *A, int levels)
 }
 
 static void
+RunAnalogyANNDouble(
+  const R2Image *A0, const R2Image *A1, const R2Image *Ap0, const R2Image *Ap1,
+  const R2Image *B0, const R2Image *B1, const R2Image *Bp0, R2Image *Bp1,
+  Location **sources0, Location **sources1, double coherence)
+{
+  int region0 = 3;
+  int region1 = 5;
+
+  int dimA0  = region0 * region0;
+  int dimAp0 = dimA0;
+  int dimA1  = region1 * region1;
+  int dimAp1 = floor(dimA1 * 0.5);
+  int dim = dimA0 + dimAp0 + dimA1 + dimAp1;
+
+  auto FillFeatureA = [&](double *output, int aI1, int aJ1) {
+    return FillFeature(output, aI1, aJ1, A0, A1, Ap0, Ap1,
+                       region0, region1, dimA0, dimA1, dimAp0, dimAp1);
+  };
+
+  auto FillFeatureB = [&](double *output, int bI1, int bJ1) {
+    return FillFeature(output, bI1, bJ1, B0, B1, Bp0, Bp1,
+                       region0, region1, dimA0, dimA1, dimAp0, dimAp1);
+  };
+
+  int width  = A1->Width();
+  int height = A1->Height();
+  int boundaryA = (int) (region1 / 2);
+  int numA = (width - boundaryA) * (height - boundaryA);
+
+  ANNpointArray featuresA = annAllocPts(numA, dim);
+  for (int i = 0; i < numA; i ++) {
+    Location a = GetLocationFromIndex(i, width, height, boundaryA);
+    FillFeatureA(featuresA[i], a.i, a.j);
+  }
+
+  ANNkd_tree *treeA = new ANNkd_tree(featuresA, numA, dim);
+
+  printf("Generating Bp\n");
+  ANNpoint featureB = annAllocPt(dim);
+  for (int   bI = 0; bI < width;  bI++) {
+    for (int bJ = 0; bJ < height; bJ++) {
+      FillFeatureB(featureB, bI, bJ);
+
+      int annIndex = ANNMatch(featureB, treeA);
+      int cohIndex = CoherenceMatch(bI, bJ, featuresA, featureB,
+                                    width, height, boundaryA, 0,
+                                    region1, dim, sources1);
+
+      int index = ChooseBestMatch(annIndex, cohIndex, coherence,
+                                  featuresA, featureB, dim);
+      Location a = GetLocationFromIndex(index, width, height, boundaryA);
+      sources1[bI][bJ] = a;
+
+      R2Pixel p;
+      R2Pixel pixelAp = Ap1->Pixel(a.i, a.j);
+      R2Pixel pixelB = B1->Pixel(bI, bJ);
+      p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
+      Bp1->SetPixel(bI, bJ, p);
+    }
+    printf("%d out of %d\n", bI, width);
+  }
+
+  annDeallocPts(featuresA);
+  annDeallocPt(featureB);
+  delete treeA;
+}
+
+static void
 RunAnalogyMulti(const R2Image *A, const R2Image *Ap,
                 const R2Image *B, const R2Image *Bp,
-                double coherence, Location **sources,
+                double coherence, Location **sourcesOut,
                 int levels)
 {
   R2Image **As  = CreateMultiResImages(A, levels);
   R2Image **Aps = CreateMultiResImages(Ap, levels);
   R2Image **Bs  = CreateMultiResImages(B, levels);
   R2Image **Bps = CreateMultiResImages(Bp, levels);
-
-  // for (int i = 0; i < levels; i ++) {
-  //   char *filename = new char[20];
-  //   strcpy(filename, Bp_filename);
-  //   strstr(filename, ".bmp")[0] = '\0';
-  //   strcat(filename, ".x.bmp");
-  //   strstr(filename, ".x.bmp")[1] = '0' + i;
-  //   printf("%s\n", filename);
-  //   Bs[i]->Write(filename);
-  // }
-
-  for (int level = 0; level < levels; level ++) {
-
+  Location ***sources = new Location **[levels];
+  for (int i = 0; i < levels; i ++) {
+    int width  = As[i]->Width();
+    int height = As[i]->Height();
+    sources[i] = new Location *[width];
+    for (int j = 0; j < width; j ++) {
+      sources[i][j] = new Location[height];
+    }
   }
+
+  RunAnalogyANN(As[0], Aps[0], Bs[0], Bps[0], coherence, sources[0]);
+
+  for (int level = 1; level < levels; level ++) {
+    RunAnalogyANNDouble(As[level-1], As[level], Aps[level-1], Aps[level],
+                        Bs[level-1], Bs[level], Bps[level-1], Bps[level],
+                        sources[level-1], sources[level], coherence);
+  }
+
+  for (int i = 0; i < A->Width(); i ++) {
+    for (int j = 0; j < A->Height(); j ++) {
+      sourcesOut[i][j] = sources[levels-1][i][j];
+    }
+  }
+
+  for (int i = 0; i < levels; i ++) {
+    char *filename = new char[20];
+    strcpy(filename, Bp_filename);
+    strstr(filename, ".bmp")[0] = '\0';
+    strcat(filename, ".x.bmp");
+    strstr(filename, ".x.bmp")[1] = '0' + i;
+    printf("%s\n", filename);
+    Bps[i]->Write(filename);
+  }
+
+  Bps[levels-1]->Write(Bp_filename);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -544,8 +645,8 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
   }
 
   // RunAnalogyBrute(newA, newAp, B, Bp, sources);
-  RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
-  // RunAnalogyMulti(newA, newAp, B, Bp, 0.2, sources, 4);
+  // RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
+  RunAnalogyMulti(newA, newAp, B, Bp, 0.2, sources, 4);
 
   R2Image *sourcesImage = new R2Image(*Bp);
   for (int bI = 0; bI < B->Width(); bI++) {
