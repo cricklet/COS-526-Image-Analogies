@@ -21,6 +21,13 @@ static char *Ap_filename = NULL;
 static char *B_filename = NULL;
 static char *Bp_filename = NULL;
 static char *Bs_filename = NULL;
+
+static bool run_brute = false;
+static bool run_ann   = false;
+static bool run_multi = false;
+
+static double coherence = 0.5;
+
 static R2Pixel mask_color = R2blue_pixel;
 static int neighborhood_size = 5;
 
@@ -122,7 +129,7 @@ CalculateStdDev(const R2Image *A, double mean)
 static void
 RemapLuminance(R2Image *A, double meanA, double stdDevA, double meanB, double stdDevB)
 {
-  printf("%f, %f, %f, %f\n", meanA, stdDevA, meanB, stdDevB);
+  // printf("%f, %f, %f, %f\n", meanA, stdDevA, meanB, stdDevB);
   for (int aI = 0; aI < A->Width(); aI++) {
     for (int aJ = 0; aJ < A->Height(); aJ++) {
       R2Pixel o = A->Pixel(aI, aJ);
@@ -223,10 +230,13 @@ static void
 RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
                 const R2Image *B, R2Image *Bp, Location **sources)
 {
-  int regionSize = 5;
+  int regionSize = neighborhood_size;
 
-  int width  = A->Width();
-  int height = A->Height();
+  int widthA  = A->Width();
+  int heightA = A->Height();
+
+  int widthB  = B->Width();
+  int heightB = B->Height();
 
   // Dimensions of feature vectors & their constituents
   int dimA  = regionSize * regionSize;
@@ -235,8 +245,8 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
 
   // Only look at a subsection of A
   int boundaryA = (int) (regionSize / 2);
-  int numA = (A->Width()  - 2 * boundaryA)
-           * (A->Height() - 2 * boundaryA);
+  int numA = (widthA  - 2 * boundaryA)
+           * (heightA - 2 * boundaryA);
 
   auto FillFeatureA = [&](double *output, int aI, int aJ) {
     return FillFeature(output, aI, aJ, A, Ap, regionSize, dimA, dimAp);
@@ -248,19 +258,19 @@ RunAnalogyBrute(const R2Image *A, const R2Image *Ap,
 
   ANNpointArray featuresA = annAllocPts(numA, dim);
   for (int i = 0; i < numA; i ++) {
-    Location a = GetLocationFromIndex(i, width, height, boundaryA);
+    Location a = GetLocationFromIndex(i, widthA, heightA, boundaryA);
     FillFeatureA(featuresA[i], a.i, a.j);
   }
 
   ANNpoint featureB = annAllocPt(dim);
 
-  for (int bI = 0; bI < B->Width(); bI++) {
-    printf("%d out of %d\n", bI, B->Width());
-    for (int bJ = 0; bJ < B->Height(); bJ++) {
+  for (int bI = 0; bI < widthB; bI++) {
+    // printf("%d out of %d\n", bI, widthB);
+    for (int bJ = 0; bJ < heightB; bJ++) {
       FillFeatureB(featureB, bI, bJ);
 
       int indexA = FindBestMatchBrute(featuresA, numA, featureB, dim);
-      Location a = GetLocationFromIndex(indexA, width, height, boundaryA);
+      Location a = GetLocationFromIndex(indexA, widthA, heightA, boundaryA);
       int aI = a.i;
       int aJ = a.j;
 
@@ -294,7 +304,8 @@ ANNMatch(ANNpoint queryPoint, ANNkd_tree *kdTree)
 
 static Location *
 CoherencePossibleSources(int bI, int bJ, int regionSize,
-                         int width, int height, int boundaryA, int boundaryB,
+                         int widthA, int heightA, int boundaryA,
+                         int widthB, int heightB, int boundaryB,
                          Location **sources, bool skipUnrendered = true)
 {
   int numPossibleSources = regionSize * regionSize;
@@ -315,7 +326,7 @@ CoherencePossibleSources(int bI, int bJ, int regionSize,
         if (dJ == 0 && dI >= 0) break;
       }
 
-      if (OutOfBounds(bI + dI, bJ + dJ, width, height, boundaryB)) {
+      if (OutOfBounds(bI + dI, bJ + dJ, widthB, heightB, boundaryB)) {
         continue;
       }
 
@@ -323,7 +334,7 @@ CoherencePossibleSources(int bI, int bJ, int regionSize,
       a.i -= dI;
       a.j -= dJ;
 
-      if (OutOfBounds(a.i, a.j, width, height, boundaryA)) {
+      if (OutOfBounds(a.i, a.j, widthA, heightA, boundaryA)) {
         continue;
       }
 
@@ -336,7 +347,8 @@ CoherencePossibleSources(int bI, int bJ, int regionSize,
 
 static int
 CoherenceMatch(int bI, int bJ, ANNpointArray featuresA, ANNpoint featureB,
-               int width, int height, int boundaryA, int boundaryB,
+               int widthA, int heightA, int boundaryA,
+               int widthB, int heightB, int boundaryB,
                int regionSize, int dim, Location **sources)
 {
   double minDist = DBL_MAX;
@@ -344,12 +356,12 @@ CoherenceMatch(int bI, int bJ, ANNpointArray featuresA, ANNpoint featureB,
 
   // Get the possible coherence sources
   int numLocations = regionSize * regionSize;
-  Location *locationsA = CoherencePossibleSources(
-    bI, bJ, regionSize, width, height, boundaryA, boundaryB, sources);
+  Location *locationsA = CoherencePossibleSources(bI, bJ, regionSize,
+    widthA, heightA, boundaryA, widthB, heightB, boundaryB, sources);
 
   for (int i = 0; i < numLocations; i ++) {
     Location a = locationsA[i];
-    int indexA = GetIndexFromLocation(a.i, a.j, width, height, boundaryA);
+    int indexA = GetIndexFromLocation(a.i, a.j, widthA, heightA, boundaryA);
     if (indexA == -1) continue;
 
     ANNpoint featureA = featuresA[indexA];
@@ -378,7 +390,7 @@ ChooseBestMatch(int annIndex, int cohIndex, double coherence,
   double annDist = GetFeatureDist(annFeature, featureB, dim);
   double cohDist = GetFeatureDist(cohFeature, featureB, dim);
 
-  if (cohDist <= annDist * (1 + pow(2, 0) * coherence)) {
+  if (cohDist <= annDist * (1 + coherence)) {
     return cohIndex;
   } else {
     return annIndex;
@@ -390,19 +402,22 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
               const R2Image *B, R2Image *Bp,
               double coherence, Location **sources)
 {
-  int regionSize = 5;
+  int regionSize = neighborhood_size;
 
   // Dimensions of feature vectors & their constituents
   int dimA  = regionSize * regionSize;
   int dimAp = floor(dimA * 0.5);
   int dim   = dimA + dimAp;
 
-  int width = A->Width();
-  int height = A->Height();
+  int widthA  = A->Width();
+  int heightA = A->Height();
+
+  int widthB  = B->Width();
+  int heightB = B->Height();
 
   // Only look at a subsection of A
   int boundaryA = (int) (regionSize / 2);
-  int numA = (width - 2 * boundaryA) * (height - 2 * boundaryA);
+  int numA = (widthA - 2 * boundaryA) * (heightA - 2 * boundaryA);
 
   auto FillFeatureA = [&](double *output, int aI, int aJ) {
     return FillFeature(output, aI, aJ, A, Ap, regionSize, dimA, dimAp);
@@ -414,26 +429,27 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
 
   ANNpointArray featuresA = annAllocPts(numA, dim);
   for (int i = 0; i < numA; i ++) {
-    Location a = GetLocationFromIndex(i, width, height, boundaryA);
+    Location a = GetLocationFromIndex(i, widthA, heightA, boundaryA);
     FillFeatureA(featuresA[i], a.i, a.j);
   }
 
   ANNkd_tree *treeA = new ANNkd_tree(featuresA, numA, dim);
 
-  printf("Generating Bp\n");
+  // printf("Generating Bp\n");
   ANNpoint featureB = annAllocPt(dim);
-  for (int   bI = 0; bI < width;  bI++) {
-    for (int bJ = 0; bJ < height; bJ++) {
+  for (int   bI = 0; bI < widthB;  bI++) {
+    for (int bJ = 0; bJ < heightB; bJ++) {
       FillFeatureB(featureB, bI, bJ);
 
       int annIndex = ANNMatch(featureB, treeA);
       int cohIndex = CoherenceMatch(bI, bJ, featuresA, featureB,
-                                    width, height, boundaryA, 0,
+                                    widthA, heightA, boundaryA,
+                                    widthB, heightB, 0,
                                     regionSize, dim, sources);
 
       int index = ChooseBestMatch(annIndex, cohIndex, coherence,
                                   featuresA, featureB, dim);
-      Location a = GetLocationFromIndex(index, width, height, boundaryA);
+      Location a = GetLocationFromIndex(index, widthA, heightA, boundaryA);
       sources[bI][bJ] = a;
 
       R2Pixel p;
@@ -442,7 +458,7 @@ RunAnalogyANN(const R2Image *A, const R2Image *Ap,
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp->SetPixel(bI, bJ, p);
     }
-    printf("%d out of %d\n", bI, width);
+    // printf("%d out of %d\n", bI, widthB);
   }
 
   annDeallocPts(featuresA);
@@ -513,8 +529,8 @@ RunAnalogyANNDouble(
   const R2Image *B0, const R2Image *B1, const R2Image *Bp0, R2Image *Bp1,
   Location **sources0, Location **sources1, double coherence)
 {
-  int region0 = 3;
-  int region1 = 5;
+  int region0 = neighborhood_size - 2;
+  int region1 = neighborhood_size;
 
   int dimA0  = region0 * region0;
   int dimAp0 = dimA0;
@@ -532,33 +548,37 @@ RunAnalogyANNDouble(
                        region0, region1, dimA0, dimA1, dimAp0, dimAp1);
   };
 
-  int width  = A1->Width();
-  int height = A1->Height();
+  int widthA  = A1->Width();
+  int heightA = A1->Height();
   int boundaryA = (int) (region1 / 2);
-  int numA = (width - boundaryA) * (height - boundaryA);
+  int numA = (widthA - boundaryA) * (heightA - boundaryA);
+
+  int widthB  = B1->Width();
+  int heightB = B1->Height();
 
   ANNpointArray featuresA = annAllocPts(numA, dim);
   for (int i = 0; i < numA; i ++) {
-    Location a = GetLocationFromIndex(i, width, height, boundaryA);
+    Location a = GetLocationFromIndex(i, widthA, heightA, boundaryA);
     FillFeatureA(featuresA[i], a.i, a.j);
   }
 
   ANNkd_tree *treeA = new ANNkd_tree(featuresA, numA, dim);
 
-  printf("Generating Bp\n");
+  // printf("Generating Bp\n");
   ANNpoint featureB = annAllocPt(dim);
-  for (int   bI = 0; bI < width;  bI++) {
-    for (int bJ = 0; bJ < height; bJ++) {
+  for (int   bI = 0; bI < widthB;  bI++) {
+    for (int bJ = 0; bJ < heightB; bJ++) {
       FillFeatureB(featureB, bI, bJ);
 
       int annIndex = ANNMatch(featureB, treeA);
       int cohIndex = CoherenceMatch(bI, bJ, featuresA, featureB,
-                                    width, height, boundaryA, 0,
+                                    widthA, heightA, boundaryA,
+                                    widthB, heightB, 0,
                                     region1, dim, sources1);
 
       int index = ChooseBestMatch(annIndex, cohIndex, coherence,
                                   featuresA, featureB, dim);
-      Location a = GetLocationFromIndex(index, width, height, boundaryA);
+      Location a = GetLocationFromIndex(index, widthA, heightA, boundaryA);
       sources1[bI][bJ] = a;
 
       R2Pixel p;
@@ -567,7 +587,7 @@ RunAnalogyANNDouble(
       p.SetYIQ(pixelAp.Y(), pixelB.I(), pixelB.Q());
       Bp1->SetPixel(bI, bJ, p);
     }
-    printf("%d out of %d\n", bI, width);
+    // printf("%d out of %d\n", bI, widthB);
   }
 
   annDeallocPts(featuresA);
@@ -577,7 +597,7 @@ RunAnalogyANNDouble(
 
 static void
 RunAnalogyMulti(const R2Image *A, const R2Image *Ap,
-                const R2Image *B, const R2Image *Bp,
+                const R2Image *B, R2Image *Bp,
                 double coherence, Location **sourcesOut,
                 int levels)
 {
@@ -587,8 +607,8 @@ RunAnalogyMulti(const R2Image *A, const R2Image *Ap,
   R2Image **Bps = CreateMultiResImages(Bp, levels);
   Location ***sources = new Location **[levels];
   for (int i = 0; i < levels; i ++) {
-    int width  = As[i]->Width();
-    int height = As[i]->Height();
+    int width  = Bs[i]->Width();
+    int height = Bs[i]->Height();
     sources[i] = new Location *[width];
     for (int j = 0; j < width; j ++) {
       sources[i][j] = new Location[height];
@@ -598,28 +618,34 @@ RunAnalogyMulti(const R2Image *A, const R2Image *Ap,
   RunAnalogyANN(As[0], Aps[0], Bs[0], Bps[0], coherence, sources[0]);
 
   for (int level = 1; level < levels; level ++) {
+    double adjustedCoherence = pow(2, level - levels) * coherence;
     RunAnalogyANNDouble(As[level-1], As[level], Aps[level-1], Aps[level],
                         Bs[level-1], Bs[level], Bps[level-1], Bps[level],
-                        sources[level-1], sources[level], coherence);
+                        sources[level-1], sources[level], adjustedCoherence);
   }
 
-  for (int i = 0; i < A->Width(); i ++) {
-    for (int j = 0; j < A->Height(); j ++) {
+  for (int i = 0; i < B->Width(); i ++) {
+    for (int j = 0; j < B->Height(); j ++) {
       sourcesOut[i][j] = sources[levels-1][i][j];
     }
   }
 
-  for (int i = 0; i < levels; i ++) {
-    char *filename = new char[20];
-    strcpy(filename, Bp_filename);
-    strstr(filename, ".bmp")[0] = '\0';
-    strcat(filename, ".x.bmp");
-    strstr(filename, ".x.bmp")[1] = '0' + i;
-    printf("%s\n", filename);
-    Bps[i]->Write(filename);
-  }
+  // Store the intermediate generated images
+  // for (int i = 0; i < levels; i ++) {
+  //   char *filename = new char[20];
+  //   strcpy(filename, Bp_filename);
+  //   strstr(filename, ".bmp")[0] = '\0';
+  //   strcat(filename, ".x.bmp");
+  //   strstr(filename, ".x.bmp")[1] = '0' + i;
+  //   // printf("%s\n", filename);
+  //   Bps[i]->Write(filename);
+  // }
 
-  Bps[levels-1]->Write(Bp_filename);
+  for (int i = 0; i < B->Width(); i ++) {
+    for (int j = 0; j < B->Height(); j ++) {
+      Bp->SetPixel(i, j, Bps[levels - 1]->Pixel(i, j));
+    }
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -644,9 +670,13 @@ CreateAnalogyImage(const R2Image *A, const R2Image *Ap, const R2Image *B)
     sources[i] = new Location[Bp->Height()];
   }
 
-  // RunAnalogyBrute(newA, newAp, B, Bp, sources);
-  // RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
-  RunAnalogyMulti(newA, newAp, B, Bp, 0.2, sources, 4);
+  if (run_brute) {
+    RunAnalogyBrute(newA, newAp, B, Bp, sources);
+  } else if (run_ann) {
+    RunAnalogyANN(newA, newAp, B, Bp, 0.2, sources);
+  } else if (run_multi) {
+    RunAnalogyMulti(newA, newAp, B, Bp, 0.2, sources, 4);
+  }
 
   R2Image *sourcesImage = new R2Image(*Bp);
   for (int bI = 0; bI < B->Width(); bI++) {
@@ -704,6 +734,10 @@ ParseArgs(int argc, char **argv)
   while (argc > 0) {
     if ((*argv)[0] == '-') {
       if (!strcmp(*argv, "-neighborhood_size")) { argv++; argc--; neighborhood_size = atoi(*argv); }
+      else if (!strcmp(*argv, "-coherence")) { argv++; argc--; coherence = atof(*argv); }
+      else if (!strcmp(*argv, "-brute")) { run_brute = true; }
+      else if (!strcmp(*argv, "-ann")) { run_ann = true; }
+      else if (!strcmp(*argv, "-multi")) { run_multi = true; }
       else if (!strcmp(*argv, "-mask_color")) { mask_color.Reset(atof(argv[1]),atof(argv[2]),atof(argv[3]),1); argv+=3; argc-=3; }
       else { fprintf(stderr, "Invalid option: %s\n", *argv); return 0; }
     }
@@ -718,10 +752,33 @@ ParseArgs(int argc, char **argv)
   }
 
   // Check program arguments
-  if (!A_filename || !Ap_filename || !B_filename || !Bp_filename) {
-    fprintf(stderr, "Usage: analogy A A\' B B\'[-mask_color r g b] [-neighborhood_size npixels]\n");
+  if (!A_filename || !Ap_filename || !B_filename || !Bp_filename
+      || (!run_brute && !run_ann && !run_multi)) {
+    fprintf(stderr, "Usage: analogy A A\' B B\'[-mask_color r g b] [-neighborhood_size npixels] [-brute|ann|multi] [-coherence 0-1]\n");
     return 0;
   }
+
+  // 'output/blah.bmp' => 'output/blah.brute.0.1.bmp'
+  char *new_Bp_filename = new char[strlen(Bp_filename) + 10];
+  strcpy(new_Bp_filename, Bp_filename);
+  strstr(new_Bp_filename, ".bmp")[0] = '\0';
+  if (run_brute) {
+    strcat(new_Bp_filename, ".brute.");
+  } else if (run_ann) {
+    strcat(new_Bp_filename, ".ann.");
+  } else if (run_multi) {
+    strcat(new_Bp_filename, ".multi.");
+  }
+  if (!run_brute) {
+    new_Bp_filename[strlen(new_Bp_filename)] = '0' + (int) coherence;
+    new_Bp_filename[strlen(new_Bp_filename)] = '.';
+    new_Bp_filename[strlen(new_Bp_filename)] = '0' + (int) (coherence * 10) % 10;
+    new_Bp_filename[strlen(new_Bp_filename)] = '.';
+    new_Bp_filename[strlen(new_Bp_filename)] = '\0';
+  }
+  strcat(new_Bp_filename, "bmp");
+  Bp_filename = new_Bp_filename;
+  printf("%s\n", Bp_filename);
 
   Bs_filename = new char[strlen(Bp_filename) + 4];
   strcpy(Bs_filename, Bp_filename);
